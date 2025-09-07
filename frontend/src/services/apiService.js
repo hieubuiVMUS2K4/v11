@@ -632,6 +632,30 @@ export const importQuestions = async (topicId, questions) => {
   }
 };
 
+// Import câu hỏi từ file Excel
+export async function importQuestionsExcel(topicId, formData) {
+  const res = await fetch(`/api/topics/${topicId}/import-questions-excel`, {
+    method: 'POST',
+    body: formData,
+    headers: {
+      // Không đặt Content-Type, để browser tự set multipart/form-data
+    }
+  });
+  
+  let data;
+  try {
+    data = await res.json();
+  } catch (err) {
+    throw new Error('Lỗi kết nối hoặc API trả về dữ liệu không hợp lệ. Kiểm tra lại đường dẫn hoặc backend.');
+  }
+  
+  if (!res.ok) {
+    throw new Error(data.message || `HTTP error! status: ${res.status}`);
+  }
+  
+  return data.data;
+}
+
 const API_BASE_URL = '/api/students';
 
 export async function importStudentsExcel(formData) {

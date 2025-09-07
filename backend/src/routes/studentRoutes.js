@@ -3,6 +3,7 @@ const router = express.Router();
 const multer = require('multer');
 const upload = multer({ dest: 'uploads/' });
 const StudentController = require('../controllers/studentController');
+const { ValidationMiddleware } = require('../middleware/validationMiddleware');
 
 /* GET students listing. */
 router.get('/', StudentController.getAllStudents);
@@ -12,11 +13,11 @@ router.get('/majors/:departmentId', StudentController.getMajorsByDepartment);
 router.get('/classes/:majorId', StudentController.getClassesByMajor);
 
 /* POST students */
-router.post('/', StudentController.addStudent);
+router.post('/', ValidationMiddleware.validateStudent, StudentController.addStudent);
 router.post('/import-excel', upload.single('file'), StudentController.importStudentsExcel);
 
 /* PUT students */
-router.put('/:id', StudentController.updateStudent);
+router.put('/:id', ValidationMiddleware.validatePartialStudent, StudentController.updateStudent);
 router.patch('/status/:id', StudentController.updateStudentStatus);
 
 /* DELETE students */

@@ -1,5 +1,8 @@
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
+const upload = multer({ dest: 'uploads/' });
+const { ValidationMiddleware } = require('../middleware/validationMiddleware');
 const AuthController = require('../controllers/authController');
 const TopicController = require('../controllers/topicController');
 const asyncHandler = require('../core/http/asyncHandler');
@@ -30,21 +33,21 @@ router.post('/refresh-token', AuthController.refreshToken);
 router.get('/verify-token', authenticateToken, AuthController.verifyToken);
 
 // ============= PASSWORD RESET (public) =============
-router.post('/auth/request-reset', asyncHandler(PasswordResetController.requestReset));
-router.post('/auth/verify-otp', asyncHandler(PasswordResetController.verifyOTPOnly));
-router.post('/auth/verify-reset', asyncHandler(PasswordResetController.verifyAndReset));
+router.post('/auth/request-reset', ValidationMiddleware.validateAuth, asyncHandler(PasswordResetController.requestReset));
+router.post('/auth/verify-otp', ValidationMiddleware.validateAuth, asyncHandler(PasswordResetController.verifyOTPOnly));
+router.post('/auth/verify-reset', ValidationMiddleware.validateAuth, asyncHandler(PasswordResetController.verifyAndReset));
 
 // ============= TOPIC ROUTES =============
 // Routes cho topics/subjects
 router.get('/topics', authenticateToken, asyncHandler(TopicController.getTopics));
-router.post('/topics', authenticateToken, requireAdmin, asyncHandler(TopicController.createTopic));
+router.post('/topics', authenticateToken, requireAdmin, ValidationMiddleware.validateTopic, asyncHandler(TopicController.createTopic));
 router.get('/topics/:id', authenticateToken, asyncHandler(TopicController.getTopicById));
-router.put('/topics/:id', authenticateToken, requireAdmin, asyncHandler(TopicController.updateTopic));
+router.put('/topics/:id', authenticateToken, requireAdmin, ValidationMiddleware.validatePartialTopic, asyncHandler(TopicController.updateTopic));
 router.delete('/topics/:id', authenticateToken, requireAdmin, asyncHandler(TopicController.deleteTopic));
 router.get('/topics/:id/questions', authenticateToken, asyncHandler(TopicController.getTopicQuestions));
-router.post('/topics/:id/import-questions', authenticateToken, requireAdmin, asyncHandler(TopicController.importQuestions));
+router.post('/topics/:id/import-questions-excel', authenticateToken, requireAdmin, upload.single('file'), asyncHandler(TopicController.importQuestionsExcel));
 router.delete('/questions/:id', authenticateToken, requireAdmin, asyncHandler(TopicController.deleteQuestion));
-router.put('/questions/:id', authenticateToken, asyncHandler(TopicController.updateQuestion));
+router.put('/questions/:id', authenticateToken, ValidationMiddleware.validatePartialQuestion, asyncHandler(TopicController.updateQuestion));
 // Đồng bộ lại question_count thủ công (admin)
 router.post('/topics-sync/question-counts', authenticateToken, requireAdmin, asyncHandler(TopicController.syncQuestionCounts));
 
@@ -64,8 +67,8 @@ router.get('/admin/students', authenticateToken, requireAdmin, StudentController
 router.get('/admin/students/search', authenticateToken, requireAdmin, StudentController.searchStudents);
 router.get('/admin/students/stats', authenticateToken, requireAdmin, StudentController.getStudentStats);
 router.get('/admin/students/:id', authenticateToken, requireAdmin, StudentController.getStudentById);
-router.post('/admin/students', authenticateToken, requireAdmin, StudentController.addStudent);
-router.put('/admin/students/:id', authenticateToken, requireAdmin, StudentController.updateStudent);
+router.post('/admin/students', authenticateToken, requireAdmin, ValidationMiddleware.validateStudent, StudentController.addStudent);
+router.put('/admin/students/:id', authenticateToken, requireAdmin, ValidationMiddleware.validatePartialStudent, StudentController.updateStudent);
 router.delete('/admin/students/:id', authenticateToken, requireAdmin, StudentController.deleteStudent);
 router.delete('/admin/students', authenticateToken, requireAdmin, StudentController.bulkDeleteStudents);
 router.patch('/admin/students/:id/status', authenticateToken, requireAdmin, StudentController.updateStudentStatus);

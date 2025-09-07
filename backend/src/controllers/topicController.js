@@ -138,6 +138,188 @@ class TopicController {
 
   // (Removed duplicate updateTopic – consolidated version is below)
 
+  // Import câu hỏi từ file Excel
+  static async importQuestionsExcel(req, res) {
+    try {
+      const { id } = req.params;
+      const xlsx = require('xlsx');
+      const fs = require('fs');
+      
+      if (!req.file) {
+        return ResponseHelper.error(res, 'Không có file được upload', 400);
+      }
+
+      // Kiểm tra xem topic có tồn tại không
+      const DatabaseService = require('../services/DatabaseService');
+      const topicExists = await DatabaseService.execute('SELECT id FROM Topics WHERE id = ?', [id]);
+      if (!topicExists.length) {
+        fs.unlinkSync(req.file.path); // Cleanup file
+        return ResponseHelper.error(res, 'Không tìm thấy chuyên đề', 404);
+      }
+
+      const workbook = xlsx.readFile(req.file.path);
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const rows = xlsx.utils.sheet_to_json(sheet);
+
+      let inserted = 0;
+      let errors = [];
+      let skipped = 0;
+
+      for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+        const row = rows[rowIndex];
+        const rowNum = rowIndex + 2; // Excel rows start from 2 (after header)
+        
+        // Đọc dữ liệu từ file Excel
+        const questionText = row['question'] || row['Câu hỏi'] || row['Question'] || row['content'];
+        const type = row['type'] || row['Loại'] || row['Type'] || 'single_choice';
+        const optionA = row['optionA'] || row['option_a'] || row['Đáp án A'] || row['A'];
+        const optionB = row['optionB'] || row['option_b'] || row['Đáp án B'] || row['B'];
+        const optionC = row['optionC'] || row['option_c'] || row['Đáp án C'] || row['C'];
+        const optionD = row['optionD'] || row['option_d'] || row['Đáp án D'] || row['D'];
+        const correctAnswer = row['correctAnswer'] || row['correct'] || row['Đáp án đúng'] || row['Correct'];
+
+        // Validate dữ liệu bắt buộc
+        if (!questionText || !questionText.trim()) {
+          errors.push(`Dòng ${rowNum}: Thiếu nội dung câu hỏi`);
+          skipped++;
+          continue;
+        }
+
+        if (!optionA || !optionB) {
+          errors.push(`Dòng ${rowNum}: Cần ít nhất 2 đáp án (A và B)`);
+          skipped++;
+          continue;
+        }
+
+        if (!correctAnswer) {
+          errors.push(`Dòng ${rowNum}: Thiếu thông tin đáp án đúng`);
+          skipped++;
+          continue;
+        }
+
+        try {
+          // Tạo danh sách options từ Excel
+          const options = [];
+          
+          if (optionA && optionA.trim()) {
+            options.push({
+              text: optionA.trim(),
+              isCorrect: correctAnswer.toString().toLowerCase().includes('a')
+            });
+          }
+          
+          if (optionB && optionB.trim()) {
+            options.push({
+              text: optionB.trim(),
+              isCorrect: correctAnswer.toString().toLowerCase().includes('b')
+            });
+          }
+          
+          if (optionC && optionC.trim()) {
+            options.push({
+              text: optionC.trim(),
+              isCorrect: correctAnswer.toString().toLowerCase().includes('c')
+            });
+          }
+          
+          if (optionD && optionD.trim()) {
+            options.push({
+              text: optionD.trim(),
+              isCorrect: correctAnswer.toString().toLowerCase().includes('d')
+            });
+          }
+
+          // Kiểm tra có ít nhất 1 đáp án đúng
+          const hasCorrectAnswer = options.some(opt => opt.isCorrect);
+          if (!hasCorrectAnswer) {
+            errors.push(`Dòng ${rowNum}: Không có đáp án nào được đánh dấu đúng`);
+            skipped++;
+            continue;
+          }
+
+          // Thêm câu hỏi vào database
+          const isMultipleChoice = type.toLowerCase().includes('multiple') || correctAnswer.toString().toLowerCase().split('').filter(char => ['a', 'b', 'c', 'd'].includes(char)).length > 1;
+          
+          const questionResult = await DatabaseService.execute(
+            'INSERT INTO Questions (topic_id, content, is_multiple_choice) VALUES (?, ?, ?)',
+            [id, questionText.trim(), isMultipleChoice ? 1 : 0]
+          );
+          
+          const questionId = questionResult.insertId;
+
+          // Thêm các đáp án
+          let answersInserted = 0;
+          for (const option of options) {
+            try {
+              await DatabaseService.execute(
+                'INSERT INTO Answers (question_id, content, is_correct, is_active) VALUES (?, ?, ?, TRUE)',
+                [questionId, option.text, option.isCorrect ? 1 : 0]
+              );
+              answersInserted++;
+            } catch (answerError) {
+              console.error(`Failed to insert answer "${option.text}":`, answerError);
+            }
+          }
+
+          if (answersInserted === 0) {
+            // Xóa câu hỏi nếu không có đáp án nào được thêm
+            await DatabaseService.execute('DELETE FROM Questions WHERE id = ?', [questionId]);
+            errors.push(`Dòng ${rowNum}: Không thể thêm đáp án nào, câu hỏi đã bị xóa`);
+            skipped++;
+            continue;
+          }
+
+          inserted++;
+        } catch (err) {
+          console.error(`Error processing row ${rowNum}:`, err);
+          errors.push(`Dòng ${rowNum}: Lỗi database - ${err.message}`);
+          skipped++;
+        }
+      }
+
+      // Cleanup uploaded file
+      fs.unlinkSync(req.file.path);
+
+      // Cập nhật số lượng câu hỏi cho chuyên đề
+      if (inserted > 0) {
+        await DatabaseService.execute('UPDATE Topics SET question_count = question_count + ? WHERE id = ?', [inserted, id]);
+        
+        // Invalidate cache
+        try {
+          const CacheService = require('../services/CacheService');
+          await CacheService.invalidateTopicCache(id);
+          await CacheService.invalidateQuestionPools(id);
+        } catch (e) {
+          console.warn('Failed to invalidate cache after import:', e.message);
+        }
+      }
+
+      // Prepare response
+      const result = {
+        total: rows.length,
+        inserted: inserted,
+        skipped: skipped,
+        success: inserted > 0,
+        errors: errors.length > 0 ? errors : null
+      };
+
+      let message = `Import hoàn thành: ${inserted}/${rows.length} câu hỏi được thêm thành công`;
+      if (skipped > 0) {
+        message += `, ${skipped} câu hỏi bị bỏ qua`;
+      }
+
+      return ResponseHelper.success(res, result, message);
+    } catch (error) {
+      console.error('Import questions Excel error:', error);
+      // Cleanup file if exists
+      if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+      return ResponseHelper.error(res, 'Lỗi import câu hỏi: ' + error.message, 500);
+    }
+  }
+
     // Thêm hàm importQuestions vào TopicController để xử lý import câu hỏi từ file Excel.
   static async importQuestions(req, res) {
     try {
@@ -176,10 +358,17 @@ class TopicController {
       }
       
       let inserted = 0;
+      let errors = [];
+      let skipped = 0;
+      
       // Thêm từng câu hỏi vào database
-      for (const q of questions) {
+      for (let i = 0; i < questions.length; i++) {
+        const q = questions[i];
+        const questionNum = i + 1;
+        
         if (!q.question) {
-          console.warn('Skipping question with no content');
+          errors.push(`Câu hỏi ${questionNum}: Thiếu nội dung câu hỏi`);
+          skipped++;
           continue;
         }
         
@@ -188,12 +377,14 @@ class TopicController {
         
         // Kiểm tra định dạng câu hỏi
         if (!q.options || !Array.isArray(q.options)) {
-          console.warn('Question has no options or options is not an array:', q.question);
+          errors.push(`Câu hỏi ${questionNum}: Không có đáp án hoặc đáp án không đúng định dạng`);
+          skipped++;
           continue;
         }
         
         if (q.options.length < 2) {
-          console.warn('Question has less than 2 options:', q.question);
+          errors.push(`Câu hỏi ${questionNum}: Cần ít nhất 2 đáp án`);
+          skipped++;
           continue;
         }
         
@@ -224,7 +415,8 @@ class TopicController {
         
         // Validate we have at least 2 valid options
         if (!q.options || !Array.isArray(q.options) || q.options.length < 2) {
-          console.warn(`Question "${q.question}" has fewer than 2 valid options. Skipping.`);
+          errors.push(`Câu hỏi ${questionNum}: Số lượng đáp án hợp lệ không đủ (cần ít nhất 2)`);
+          skipped++;
           continue;
         }
         
@@ -239,7 +431,8 @@ class TopicController {
           
           // Validate question text
           if (!q.question || typeof q.question !== 'string' || q.question.trim() === '') {
-            console.error('Empty question content, skipping');
+            errors.push(`Câu hỏi ${questionNum}: Nội dung câu hỏi trống`);
+            skipped++;
             continue;
           }
           
@@ -296,13 +489,16 @@ class TopicController {
             // No answers were inserted, delete the orphaned question
             console.warn('No answers were inserted, deleting orphaned question');
             await DatabaseService.execute('DELETE FROM Questions WHERE id = ?', [questionId]);
+            errors.push(`Câu hỏi ${questionNum}: Không thể thêm đáp án nào, câu hỏi đã bị xóa`);
+            skipped++;
             continue;
           }
           
           inserted++;
         } catch (err) {
           console.error(`Error inserting question "${q.question}":`, err);
-          // Continue with the next question even if this one failed
+          errors.push(`Câu hỏi ${questionNum}: Lỗi database - ${err.message}`);
+          skipped++;
         }
       }
       
@@ -348,10 +544,13 @@ class TopicController {
       }
       
       return ResponseHelper.success(res, { 
+        total: questions.length,
         inserted,
+        skipped,
         success: inserted > 0,
-        message: `Đã import ${inserted} câu hỏi thành công` 
-      }, `Đã import ${inserted} câu hỏi thành công`);
+        errors: errors.length > 0 ? errors : null,
+        message: `Đã import ${inserted}/${questions.length} câu hỏi thành công` + (skipped > 0 ? `, ${skipped} câu hỏi bị bỏ qua` : '')
+      }, `Đã import ${inserted}/${questions.length} câu hỏi thành công`);
     } catch (error) {
       console.error('Import questions error:', error);
       return ResponseHelper.error(res, 'Lỗi server khi import câu hỏi: ' + error.message, 500);

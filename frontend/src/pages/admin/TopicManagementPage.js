@@ -16,7 +16,6 @@ import {
   FaSave,
   FaBook,
   FaFileImport,
-  FaDownload,
   FaUpload,
   FaSearch
 } from 'react-icons/fa';
@@ -27,13 +26,11 @@ import {
   createTopic,
   deleteTopic,
   getTopicQuestions,
-  importQuestions,
+  importQuestionsExcel,
   createQuestion,
   updateQuestion,
   deleteQuestion
 } from '../../services/apiService';
-import * as XLSX from 'xlsx';
-import { createQuestionTemplateExcel } from '../../utils/excelHelper';
 
 const TopicManagementPage = () => {
   // State
@@ -371,10 +368,6 @@ const TopicManagementPage = () => {
     setImportFile(null);
   };
 
-  const handleDownloadTemplate = () => {
-    createQuestionTemplateExcel();
-  };
-
   const handleAddQuestion = async () => {
     if (!addQuestionForm.question || addQuestionForm.options.some(opt => !opt.trim()) || addQuestionForm.correctOptions.length === 0) {
       alert('Vui lòng điền đầy đủ câu hỏi, đáp án và chọn ít nhất 1 đáp án đúng!');
@@ -439,7 +432,8 @@ const TopicManagementPage = () => {
     }
   };
 
-  const handleImportQuestions = async () => {
+  // Import câu hỏi từ Excel
+  const handleImportQuestionsExcel = async () => {
     if (!importFile || !viewingSubject) {
       alert('Vui lòng chọn file Excel');
       return;
@@ -447,114 +441,30 @@ const TopicManagementPage = () => {
 
     setSaving(true);
     try {
-      // Đọc file Excel
-      const fileBuffer = await importFile.arrayBuffer();
-      const workbook = XLSX.read(fileBuffer);
-      const sheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[sheetName];
-      const data = XLSX.utils.sheet_to_json(worksheet);
-
-      console.log('Excel data:', data);
-
-      if (!data || data.length === 0) {
-        throw new Error('File Excel không có dữ liệu hoặc định dạng không đúng');
+      const formData = new FormData();
+      formData.append('file', importFile);
+      
+      const result = await importQuestionsExcel(viewingSubject.id, formData);
+      
+      // Hiển thị kết quả chi tiết
+      let message = `Import hoàn thành: ${result.inserted}/${result.total} câu hỏi được thêm thành công`;
+      if (result.skipped > 0) {
+        message += `\n${result.skipped} câu hỏi bị bỏ qua`;
       }
-
-      // Chuyển đổi dữ liệu Excel thành format phù hợp
-      const questions = data.map((row, index) => {
-        console.log(`Processing row ${index + 1}:`, row);
-
-        // Lấy nội dung câu hỏi - hỗ trợ nhiều định dạng cột
-        const questionText = (row.question || row.Question || row['Câu hỏi'] || row['câu hỏi'] || '').toString();
-        
-        if (!questionText || questionText.trim() === '') {
-          console.warn(`Row ${index + 1}: Missing question text`);
-          return null;
+      if (result.errors && result.errors.length > 0) {
+        message += `\n\nChi tiết lỗi:\n` + result.errors.slice(0, 5).join('\n');
+        if (result.errors.length > 5) {
+          message += `\n... và ${result.errors.length - 5} lỗi khác`;
         }
-
-        // Lấy các đáp án - hỗ trợ nhiều định dạng cột
-        const optionA = (row.optionA || row.OptionA || row['Đáp án A'] || row['đáp án A'] || '').toString();
-        const optionB = (row.optionB || row.OptionB || row['Đáp án B'] || row['đáp án B'] || '').toString();
-        const optionC = (row.optionC || row.OptionC || row['Đáp án C'] || row['đáp án C'] || '').toString();
-        const optionD = (row.optionD || row.OptionD || row['Đáp án D'] || row['đáp án D'] || '').toString();
-
-        // Lấy đáp án đúng - hỗ trợ nhiều định dạng cột
-        const correctOption = (row.correctOption || row.CorrectOption || row['Đáp án đúng'] || row['đáp án đúng'] || row.correctAnswer || '').toString().toUpperCase();
-        
-        console.log(`Row ${index + 1} - Question: "${questionText}"`);
-        console.log(`Options: A="${optionA}", B="${optionB}", C="${optionC}", D="${optionD}"`);
-        console.log(`Correct: "${correctOption}"`);
-        
-        // Tạo mảng options
-        const options = [];
-        if (optionA.trim()) options.push({ text: optionA.trim(), isCorrect: false });
-        if (optionB.trim()) options.push({ text: optionB.trim(), isCorrect: false });
-        if (optionC.trim()) options.push({ text: optionC.trim(), isCorrect: false });
-        if (optionD.trim()) options.push({ text: optionD.trim(), isCorrect: false });
-
-        if (options.length < 2) {
-          console.warn(`Row ${index + 1}: Question needs at least 2 options`);
-          return null;
-        }
-
-        // Xác định đáp án đúng
-        const correctAnswers = correctOption.split(',').map(s => s.trim()).filter(s => s);
-        
-        // Đánh dấu đáp án đúng
-        correctAnswers.forEach(answer => {
-          switch(answer) {
-            case 'A':
-              if (options[0]) options[0].isCorrect = true;
-              break;
-            case 'B':
-              if (options[1]) options[1].isCorrect = true;
-              break;
-            case 'C':
-              if (options[2]) options[2].isCorrect = true;
-              break;
-            case 'D':
-              if (options[3]) options[3].isCorrect = true;
-              break;
-            default:
-              console.warn(`Invalid correct answer option: ${answer}`);
-              break;
-          }
-        });
-
-        // Nếu không có đáp án đúng nào được đánh dấu, đặt đáp án đầu tiên là đúng
-        if (!options.some(opt => opt.isCorrect)) {
-          console.warn(`Row ${index + 1}: No correct answer specified, setting first option as correct`);
-          options[0].isCorrect = true;
-        }
-
-        // Xác định loại câu hỏi
-        const questionType = correctAnswers.length > 1 ? 'multiple_choice' : 'single_choice';
-
-        console.log(`Row ${index + 1} - Final options:`, options.map((opt, i) => `${String.fromCharCode(65+i)}: ${opt.text} (${opt.isCorrect ? 'CORRECT' : 'wrong'})`));
-
-        return {
-          question: questionText.trim(),
-          options: options,
-          type: questionType
-        };
-      }).filter(q => q !== null); // Loại bỏ các câu hỏi không hợp lệ
-
-      console.log('Processed questions:', questions);
-
-      if (questions.length === 0) {
-        throw new Error('Không có câu hỏi hợp lệ nào để import. Vui lòng kiểm tra lại định dạng file.');
       }
-
-      // Gọi API import
-      console.log('Calling importQuestions API with:', { topicId: viewingSubject.id, questionsCount: questions.length });
-      await importQuestions(viewingSubject.id, questions);
-      alert(`Import thành công ${questions.length} câu hỏi!`);
+      
+      alert(message);
       closeImportModal();
       handleViewQuestions(viewingSubject); // Reload questions
       loadSubjects(); // Reload subjects to update question count
     } catch (err) {
-      console.error('Import error:', err);
-      alert('Lỗi import: ' + (err.message || 'Không thể import'));
+      console.error('Import Excel error:', err);
+      alert('Lỗi import Excel: ' + (err.message || 'Không thể import'));
     } finally {
       setSaving(false);
     }
@@ -1185,21 +1095,13 @@ const TopicManagementPage = () => {
                 />
                 <div className={styles.importActions}>
                   <button
-                    className={styles.templateBtn}
-                    onClick={handleDownloadTemplate}
-                    type="button"
-                  >
-                    <FaDownload />
-                    Tải mẫu Excel
-                  </button>
-                  <button
                     className={styles.importBtn}
-                    onClick={handleImportQuestions}
+                    onClick={handleImportQuestionsExcel}
                     disabled={!importFile || saving}
                     type="button"
                   >
                     <FaUpload />
-                    Import
+                    Import Excel
                   </button>
                 </div>
               </div>

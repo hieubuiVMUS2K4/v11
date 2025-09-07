@@ -934,7 +934,13 @@ return ResponseHelper.success(res, {
       const rows = xlsx.utils.sheet_to_json(sheet);
 
       let imported = [];
-      for (const row of rows) {
+      let errors = [];
+      let skipped = 0;
+      
+      for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+        const row = rows[rowIndex];
+        const rowNum = rowIndex + 2; // Excel rows start from 2 (after header)
+        
         // Đọc dữ liệu từ file
         const studentCode = row['studentCode'] || row['username'] || row['Mã sinh viên'] || row['Username'];
         const fullName = row['fullName'] || row['Họ tên'] || row['Full Name'] || row['name'];
@@ -944,23 +950,64 @@ return ResponseHelper.success(res, {
         const classId = row['classId'] || row['Mã lớp'] || row['Class ID'] || row['Lớp'];
         const username = row['username'] || studentCode;
 
-        // Bỏ qua nếu thiếu thông tin bắt buộc
-        if (!studentCode || !fullName || !email || !classId || !dateOfBirth || !username) continue;
+        // Kiểm tra thông tin bắt buộc
+        if (!studentCode || !fullName || !email || !classId || !dateOfBirth || !username) {
+          errors.push(`Dòng ${rowNum}: Thiếu thông tin bắt buộc (mã SV, họ tên, email, lớp, ngày sinh)`);
+          skipped++;
+          continue;
+        }
 
         try {
           // Validate dateOfBirth format
           const dob = new Date(dateOfBirth);
-          if (isNaN(dob.getTime())) continue; // Bỏ qua nếu ngày sinh không hợp lệ
+          if (isNaN(dob.getTime())) {
+            errors.push(`Dòng ${rowNum}: Ngày sinh không hợp lệ "${dateOfBirth}"`);
+            skipped++;
+            continue;
+          }
+
+          // Validate email format
+          const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+          if (!emailRegex.test(email)) {
+            errors.push(`Dòng ${rowNum}: Email không hợp lệ "${email}"`);
+            skipped++;
+            continue;
+          }
+
+          // Kiểm tra classId có tồn tại
+          const classExists = await DatabaseService.execute('SELECT id FROM Classes WHERE id = ?', [classId]);
+          if (classExists.length === 0) {
+            errors.push(`Dòng ${rowNum}: Lớp ID ${classId} không tồn tại trong hệ thống`);
+            skipped++;
+            continue;
+          }
 
           // Generate default password from date of birth
           const defaultPassword = StudentController.generateDefaultPassword(dateOfBirth);
 
-          // Kiểm tra trùng email/username
-          const existUser = await DatabaseService.execute(
-            'SELECT id FROM Users WHERE email = ? OR username = ?',
-            [email, username]
-          );
-          if (existUser.length > 0) continue;
+          // Kiểm tra trùng email
+          const existEmail = await DatabaseService.execute('SELECT id FROM Users WHERE email = ?', [email]);
+          if (existEmail.length > 0) {
+            errors.push(`Dòng ${rowNum}: Email "${email}" đã tồn tại trong hệ thống`);
+            skipped++;
+            continue;
+          }
+
+          // Kiểm tra trùng username
+          const existUsername = await DatabaseService.execute('SELECT id FROM Users WHERE username = ?', [username]);
+          if (existUsername.length > 0) {
+            errors.push(`Dòng ${rowNum}: Tài khoản "${username}" đã tồn tại trong hệ thống`);
+            skipped++;
+            continue;
+          }
+
+          // Kiểm tra trùng mã sinh viên
+          const existStudentCode = await DatabaseService.execute('SELECT id FROM Students WHERE student_code = ?', [studentCode]);
+          if (existStudentCode.length > 0) {
+            errors.push(`Dòng ${rowNum}: Mã sinh viên "${studentCode}" đã tồn tại trong hệ thống`);
+            skipped++;
+            continue;
+          }
 
           // Thêm vào bảng Users
           const usersStructure = await DatabaseService.getTableStructure('Users');
@@ -980,6 +1027,7 @@ return ResponseHelper.success(res, {
           await DatabaseService.execute(studentInsertSql, [userId, studentCode, phoneNumber || null, classId, dob.toISOString().split('T')[0]]);
 
           imported.push({
+            row: rowNum,
             studentCode,
             fullName,
             email,
@@ -990,12 +1038,36 @@ return ResponseHelper.success(res, {
             password: defaultPassword
           });
         } catch (err) {
-          // Bỏ qua lỗi từng dòng
+          console.error(`Error processing row ${rowNum}:`, err);
+          errors.push(`Dòng ${rowNum}: Lỗi database - ${err.message}`);
+          skipped++;
         }
       }
+      
+      // Cleanup uploaded file
       fs.unlinkSync(req.file.path);
-      return ResponseHelper.success(res, imported, 'Import sinh viên thành công');
+      
+      // Prepare response with detailed results
+      const result = {
+        total: rows.length,
+        imported: imported.length,
+        skipped: skipped,
+        students: imported,
+        errors: errors.length > 0 ? errors : null
+      };
+      
+      let message = `Import hoàn thành: ${imported.length}/${rows.length} sinh viên được thêm thành công`;
+      if (skipped > 0) {
+        message += `, ${skipped} dòng bị bỏ qua`;
+      }
+      
+      return ResponseHelper.success(res, result, message);
     } catch (error) {
+      console.error('Import students error:', error);
+      // Cleanup file if exists
+      if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
       return ResponseHelper.error(res, 'Lỗi import sinh viên: ' + error.message, 500);
     }
   }

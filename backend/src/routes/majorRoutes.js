@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const MajorController = require('../controllers/majorController');
 const { authenticateToken, requireAdmin } = require('../middleware/authMiddleware');
+const { ValidationMiddleware } = require('../middleware/validationMiddleware');
 
 // Middleware chung cho tất cả routes
 router.use(authenticateToken);
@@ -14,10 +15,10 @@ router.get('/department/:departmentId', MajorController.getMajorsByDepartment);
 router.get('/:id', MajorController.getMajorById);
 
 // POST routes
-router.post('/', MajorController.createMajor);
+router.post('/', ValidationMiddleware.validateAcademic, MajorController.createMajor);
 
 // PUT routes
-router.put('/:id', MajorController.updateMajor);
+router.put('/:id', ValidationMiddleware.validatePartialAcademic, MajorController.updateMajor);
 
 // DELETE routes
 router.delete('/bulk', MajorController.bulkDeleteMajors);
